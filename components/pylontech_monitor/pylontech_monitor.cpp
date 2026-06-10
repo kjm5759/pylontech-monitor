@@ -250,27 +250,34 @@ void PylontechMonitorComponent::process_buffer_() {
 
 // ============================================================
 // parse_pwr_table_() — réponse "pwr"
+// La Pylontech envoie \r\r\n avant chaque ligne — on déclenche
+// uniquement sur \n et on utilise un flag par batterie pour
+// ne publier qu'une seule fois par cycle.
 // ============================================================
 void PylontechMonitorComponent::parse_pwr_table_() {
   const char *fin = rx_buf_ + rx_len_;
   const char *pos = strstr(rx_buf_, "Power Volt");
   if (!pos) return;
 
+  bool published[MAX_BATTERIES] = {};
+
   while (pos < fin) {
-    if (*pos == '\n' || *pos == '\r') {
+    if (*pos == '\n') {
       const char *line = pos + 1;
-      while (line < fin && (*line == ' ' || *line == '\t')) line++;
+      while (line < fin && (*line == ' ' || *line == '\t' || *line == '\r')) line++;
       int bat_idx = atoi(line);
-      if (bat_idx >= 1 && bat_idx <= (int)battery_count_) {
+      if (bat_idx >= 1 && bat_idx <= (int)battery_count_ && !published[bat_idx - 1]) {
         int b_num = 0, bsoc = 0;
         float v = 0, c = 0, t = 0, tl = 0, th = 0, vl = 0, vh = 0;
         int r = sscanf(line, "%d %f %f %f %f %f %f %f %*s %*s %*s %*s %d",
                        &b_num, &v, &c, &t, &tl, &th, &vl, &vh, &bsoc);
-        if (r >= 3)
+        if (r >= 3) {
           publish_pwr_row_(bat_idx,
                            v / 1000.0f, c / 1000.0f, t / 1000.0f,
                            tl / 1000.0f, th / 1000.0f,
                            vl / 1000.0f, vh / 1000.0f, bsoc);
+          published[bat_idx - 1] = true;
+        }
       }
     }
     pos++;
@@ -434,3 +441,4 @@ void PylontechMonitorComponent::parse_stat_(int bat_idx) {
 
 }  // namespace pylontech_monitor
 }  // namespace esphome
+
