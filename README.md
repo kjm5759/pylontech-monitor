@@ -213,7 +213,7 @@ automation:
 | `cell_voltage_low`  | V    | Lowest cell voltage      |
 | `soc`               | %    | State of Charge          |
 | `cycle_count`       | cycles | Charge cycle count     |
-| `coulomb`           | Ah   | Cumulative coulomb count |
+| `coulomb`           | C    | Cumulative coulomb count |
 | `capacity`          | Ah   | Remaining capacity       |
 | `soh`               | %    | State of Health          |
 | `cells`             | V    | List of up to 15 cell voltages |
