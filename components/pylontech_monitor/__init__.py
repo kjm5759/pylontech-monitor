@@ -154,7 +154,7 @@ BATTERY_SCHEMA = cv.Schema(
             accuracy_decimals=0,
         ),
         cv.Optional(CONF_COULOMB): sensor.sensor_schema(
-            unit_of_measurement="Ah",
+            unit_of_measurement="C",
             icon="mdi:battery-charging",
             state_class=STATE_CLASS_MEASUREMENT,
             accuracy_decimals=1,
