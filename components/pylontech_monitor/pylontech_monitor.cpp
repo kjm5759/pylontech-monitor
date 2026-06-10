@@ -79,10 +79,14 @@ void PylontechMonitorComponent::loop() {
   }
 
   // 2. Timeout silence UART
+  // Pour pwrsys/pwr : on attend le prompt pylon_debug> — pas de timeout silence
+  // Pour getpwr/stat : le prompt est moins fiable, on garde le timeout
   if (rx_len_ > 0 && (millis() - last_rx_ms_) > RX_SILENCE_MS) {
-    process_buffer_();
-    advance_phase_();
-    return;
+    if (phase_ != QueryPhase::WAIT_PWRSYS && phase_ != QueryPhase::WAIT_INFO) {
+      process_buffer_();
+      advance_phase_();
+      return;
+    }
   }
 
   // 3. Cycle lent
