@@ -115,7 +115,7 @@ ethernet:
   mosi_pin: GPIO11
   miso_pin: GPIO13
   cs_pin: GPIO10
-  int_pin: GPIO9
+  interrupt_pin: GPIO9
   reset_pin: GPIO14
 ```
 
