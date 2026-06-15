@@ -23,6 +23,12 @@ Supports up to **10 batteries × 15 cells**, dual update rate, and an optional i
 
 > ⚠️ This component uses the **console port** of the Pylontech master battery, not the CAN or RS485 BMS port.
 
+> ⚠️ **GPIO1/GPIO3 conflict (classic ESP32 boards)**  
+> On classic ESP32 (not S3), GPIO1/GPIO3 are **UART0** — the same port used for USB/logging.  
+> If you wire the Pylontech UART to GPIO1/GPIO3, ESPHome logs and Pylontech responses will be mixed on the same serial line, causing corrupted data and missing battery sensors.  
+> **Use different GPIOs for the Pylontech UART**, e.g. GPIO16 (RX) / GPIO17 (TX) on classic ESP32.  
+> ESP32-S3 does not have this restriction — GPIO1/GPIO2 (or others) work fine as a dedicated UART.
+
 Connect the ESP32 UART to the **console port** of the Pylontech master battery (RJ45 connector).
 
 The console port outputs **RS232 TTL levels** — you need a **RS232-to-TTL adapter** (MAX3232 or similar) between the Pylontech and the ESP32.
@@ -246,7 +252,7 @@ automation:
 | `cell_voltage_low`  | V    | Lowest cell voltage      |
 | `soc`               | %    | State of Charge          |
 | `cycle_count`       | cycles | Charge cycle count     |
-| `coulomb`           | C    | Cumulative coulomb count |
+| `coulomb`           | C   | Cumulative coulomb count |
 | `capacity`          | Ah   | Remaining capacity       |
 | `soh`               | %    | State of Health          |
 | `cells`             | V    | List of up to 15 cell voltages |
