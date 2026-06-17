@@ -9,7 +9,7 @@ Supports:
 
 import esphome.codegen as cg
 import esphome.config_validation as cv
-from esphome.components import sensor, uart
+from esphome.components import sensor, text_sensor, uart
 from esphome.const import (
     CONF_ID,
     CONF_PIN,
@@ -30,7 +30,7 @@ from esphome.const import (
 from esphome import pins
 
 DEPENDENCIES = ["uart"]
-AUTO_LOAD  = ["sensor"]
+AUTO_LOAD  = ["sensor", "text_sensor"]
 
 pylontech_monitor_ns = cg.esphome_ns.namespace("pylontech_monitor")
 PylontechMonitorComponent = pylontech_monitor_ns.class_(
@@ -44,6 +44,7 @@ PylontechMonitorComponent = pylontech_monitor_ns.class_(
 # ---------------------------------------------------------------------------
 CONF_BATTERY_COUNT          = "battery_count"
 CONF_SLOW_INTERVAL          = "slow_interval"
+CONF_ENABLE_INFO_COMMAND    = "enable_info_command"
 
 # Capteurs système
 CONF_SYSTEM_VOLTAGE         = "system_voltage"
@@ -74,7 +75,19 @@ CONF_CYCLE_COUNT= "cycle_count"
 CONF_COULOMB    = "coulomb"
 CONF_CAPACITY   = "capacity"
 CONF_SOH        = "soh"
+CONF_ESTIMATED_SOH = "estimated_soh"
 CONF_CELLS      = "cells"
+
+# Identification batterie via commande "info N" (expérimental)
+CONF_DEVICE_NAME        = "device_name"
+CONF_MANUFACTURER       = "manufacturer"
+CONF_BARCODE            = "barcode"
+CONF_SPECIFICATION      = "specification"
+CONF_BOARD_VERSION      = "board_version"
+CONF_MAIN_SOFT_VERSION  = "main_soft_version"
+CONF_SOFT_VERSION       = "soft_version"
+CONF_BOOT_VERSION       = "boot_version"
+CONF_COMM_VERSION       = "comm_version"
 
 # Relais intégré
 CONF_RELAY              = "relay"
@@ -171,6 +184,17 @@ BATTERY_SCHEMA = cv.Schema(
             state_class=STATE_CLASS_MEASUREMENT,
             accuracy_decimals=1,
         ),
+        # SOH ESTIMÉ — expérimental, nécessite enable_info_command: true.
+        # Calculé comme capacity_actuelle / capacité_nominale (extraite du
+        # champ Specification de "info N"). Fluctue avec température et
+        # charge en cours : à interpréter comme une tendance, pas une
+        # valeur de référence officielle.
+        cv.Optional(CONF_ESTIMATED_SOH): sensor.sensor_schema(
+            unit_of_measurement=UNIT_PERCENT,
+            icon="mdi:heart-pulse",
+            state_class=STATE_CLASS_MEASUREMENT,
+            accuracy_decimals=1,
+        ),
         cv.Optional(CONF_CELLS): cv.All(
             cv.ensure_list(
                 sensor.sensor_schema(
@@ -181,6 +205,37 @@ BATTERY_SCHEMA = cv.Schema(
                 )
             ),
             cv.Length(min=1, max=15),
+        ),
+
+        # ── Identification (commande "info N" — expérimental) ──────────
+        # Nécessite enable_info_command: true au niveau du composant.
+        # Compatibilité non garantie selon le firmware Pylontech.
+        cv.Optional(CONF_DEVICE_NAME): text_sensor.text_sensor_schema(
+            icon="mdi:identifier",
+        ),
+        cv.Optional(CONF_MANUFACTURER): text_sensor.text_sensor_schema(
+            icon="mdi:factory",
+        ),
+        cv.Optional(CONF_BARCODE): text_sensor.text_sensor_schema(
+            icon="mdi:barcode",
+        ),
+        cv.Optional(CONF_SPECIFICATION): text_sensor.text_sensor_schema(
+            icon="mdi:information-outline",
+        ),
+        cv.Optional(CONF_BOARD_VERSION): text_sensor.text_sensor_schema(
+            icon="mdi:chip",
+        ),
+        cv.Optional(CONF_MAIN_SOFT_VERSION): text_sensor.text_sensor_schema(
+            icon="mdi:chip",
+        ),
+        cv.Optional(CONF_SOFT_VERSION): text_sensor.text_sensor_schema(
+            icon="mdi:chip",
+        ),
+        cv.Optional(CONF_BOOT_VERSION): text_sensor.text_sensor_schema(
+            icon="mdi:chip",
+        ),
+        cv.Optional(CONF_COMM_VERSION): text_sensor.text_sensor_schema(
+            icon="mdi:chip",
         ),
     }
 )
@@ -195,6 +250,12 @@ CONFIG_SCHEMA = (
 
             cv.Optional(CONF_BATTERY_COUNT, default=1): cv.int_range(min=1, max=10),
             cv.Optional(CONF_SLOW_INTERVAL, default="60s"): cv.positive_time_period_milliseconds,
+
+            # Active la requête "info N" par batterie (identification :
+            # modèle, fabricant, numéro de série, versions firmware).
+            # EXPÉRIMENTAL — compatibilité non garantie selon le firmware.
+            # Exécutée une seule fois au démarrage (données statiques).
+            cv.Optional(CONF_ENABLE_INFO_COMMAND, default=False): cv.boolean,
 
             # Relais intégré (optionnel)
             cv.Optional(CONF_RELAY): RELAY_SCHEMA,
@@ -321,6 +382,20 @@ BATTERY_SENSORS = [
     (CONF_COULOMB,      "set_coulomb_sensor"),
     (CONF_CAPACITY,     "set_capacity_sensor"),
     (CONF_SOH,          "set_soh_sensor"),
+    (CONF_ESTIMATED_SOH, "set_estimated_soh_sensor"),
+]
+
+# Capteurs texte d'identification (commande "info N" — expérimental)
+BATTERY_TEXT_SENSORS = [
+    (CONF_DEVICE_NAME,       "set_device_name_text_sensor"),
+    (CONF_MANUFACTURER,      "set_manufacturer_text_sensor"),
+    (CONF_BARCODE,           "set_barcode_text_sensor"),
+    (CONF_SPECIFICATION,     "set_specification_text_sensor"),
+    (CONF_BOARD_VERSION,     "set_board_version_text_sensor"),
+    (CONF_MAIN_SOFT_VERSION, "set_main_soft_version_text_sensor"),
+    (CONF_SOFT_VERSION,      "set_soft_version_text_sensor"),
+    (CONF_BOOT_VERSION,      "set_boot_version_text_sensor"),
+    (CONF_COMM_VERSION,      "set_comm_version_text_sensor"),
 ]
 
 # ---------------------------------------------------------------------------
@@ -333,6 +408,7 @@ async def to_code(config):
 
     cg.add(var.set_battery_count(config[CONF_BATTERY_COUNT]))
     cg.add(var.set_slow_interval(config[CONF_SLOW_INTERVAL]))
+    cg.add(var.set_enable_info_command(config[CONF_ENABLE_INFO_COMMAND]))
 
     # Relais intégré
     if CONF_RELAY in config:
@@ -363,4 +439,10 @@ async def to_code(config):
                     sens = await sensor.new_sensor(cell_conf)
                     cg.add(cg.RawExpression(
                         f"{var}->get_battery({bat_index})->set_cell_sensor({cell_index}, {sens})"
+                    ))
+            for conf_key, setter in BATTERY_TEXT_SENSORS:
+                if conf_key in bat_conf:
+                    sens = await text_sensor.new_text_sensor(bat_conf[conf_key])
+                    cg.add(cg.RawExpression(
+                        f"{var}->get_battery({bat_index})->{setter}({sens})"
                     ))
