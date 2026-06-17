@@ -1,5 +1,6 @@
 #include "pylontech_monitor.h"
 #include "esphome/core/log.h"
+#include <string>
 
 namespace esphome {
 namespace pylontech_monitor {
@@ -14,6 +15,7 @@ void PylontechMonitorComponent::setup() {
   memset(rx_buf_, 0, BUFFER_SIZE);
   phase_        = QueryPhase::IDLE;
   last_slow_ms_ = millis();
+  boot_time_ms_ = millis();
 
   if (relay_pin_ != nullptr) {
     relay_pin_->setup();
@@ -50,11 +52,31 @@ void PylontechMonitorComponent::dump_config() {
 
 // ============================================================
 // update() — cycle RAPIDE
+// Si enable_info_command_ est actif, la commande "info N" par
+// batterie est exécutée une seule fois (premier cycle après boot)
+// avant de démarrer le cycle rapide normal.
 // ============================================================
 void PylontechMonitorComponent::update() {
   if (phase_ == QueryPhase::IDLE) {
-    phase_ = QueryPhase::SEND_PWRSYS;
-    advance_phase_();
+    // Délai de stabilisation UART après boot/reset avant le tout premier
+    // "info N" — un reset rapide (OTA, bouton RST) peut laisser l'UART
+    // dans un état transitoire pendant les premières centaines de ms,
+    // ce qui faisait parfois échouer la réponse de la batterie 1.
+    bool info_ready = (millis() - boot_time_ms_) >= INFO_BOOT_DELAY_MS;
+
+    if (enable_info_command_ && !batinfo_done_ && info_ready) {
+      send_warmup_byte_();  // purge un éventuel parasite TX avant "info 1"
+      current_bat_cmd_ = 1;
+      phase_           = QueryPhase::SEND_BATINFO;
+      advance_phase_();
+    } else if (enable_info_command_ && !batinfo_done_ && !info_ready) {
+      // Pas encore prêt — on attend le prochain cycle update() sans
+      // rien envoyer, pour laisser l'UART se stabiliser.
+      return;
+    } else {
+      phase_ = QueryPhase::SEND_PWRSYS;
+      advance_phase_();
+    }
   }
 }
 
@@ -109,7 +131,7 @@ void PylontechMonitorComponent::loop() {
       phase_ != QueryPhase::SEND_CELLS  &&
       phase_ != QueryPhase::SEND_STAT) {
     if (millis() > phase_deadline_ms_) {
-      ESP_LOGW(TAG, "Timeout phase %d (bat %d)", (int)phase_, current_bat_cmd_);
+      ESP_LOGW(TAG, "Timeout phase %d (bat %d) — no response received", (int)phase_, current_bat_cmd_);
       advance_phase_();
     }
   }
@@ -146,12 +168,33 @@ void PylontechMonitorComponent::update_relay_() {
 // send_command_()
 // ============================================================
 void PylontechMonitorComponent::send_command_(const char *cmd) {
+  // Vider le buffer matériel UART en réception avant d'envoyer
+  while (this->available()) {
+    this->read();
+  }
+
   ESP_LOGD(TAG, "TX → %s", cmd);
   this->write_str(cmd);
   this->write_byte('\r');
   rx_len_ = 0;
   memset(rx_buf_, 0, BUFFER_SIZE);
   last_rx_ms_ = millis();
+}
+
+// ============================================================
+// send_warmup_byte_() — envoie un octet "à vide" (\r seul) pour
+// purger un éventuel parasite sur la ligne TX au tout premier envoi
+// après le boot. Observé : le premier write_str() après reset peut
+// laisser passer un octet corrompu avant la commande réelle
+// (ex: "info 1" reçu comme "8\xf8info 1" côté Pylontech), faisant
+// échouer la réponse silencieusement pour la toute première requête.
+// ============================================================
+void PylontechMonitorComponent::send_warmup_byte_() {
+  this->write_byte('\r');
+  delay(50);
+  while (this->available()) {
+    this->read();
+  }
 }
 
 // ============================================================
@@ -225,6 +268,31 @@ void PylontechMonitorComponent::advance_phase_() {
       phase_ = QueryPhase::SEND_STAT;
       advance_phase_();
       break;
+
+    // ── Commande "info N" — ponctuelle, une seule fois au boot ──
+    case QueryPhase::SEND_BATINFO:
+      if (current_bat_cmd_ <= battery_count_) {
+        char cmd[16];
+        snprintf(cmd, sizeof(cmd), "info %d", current_bat_cmd_);
+        send_command_(cmd);
+        phase_ = QueryPhase::WAIT_BATINFO;
+        // Timeout plus long pour "info 1" — première commande après le
+        // boot, la Pylontech peut être plus lente à répondre que pour
+        // les commandes suivantes qui suivent un flux UART déjà actif.
+        uint32_t timeout = (current_bat_cmd_ == 1) ? (CMD_TIMEOUT_MS * 2) : CMD_TIMEOUT_MS;
+        phase_deadline_ms_ = millis() + timeout;
+      } else {
+        ESP_LOGD(TAG, "Battery info query complete");
+        batinfo_done_ = true;
+        phase_        = QueryPhase::IDLE;
+      }
+      break;
+
+    case QueryPhase::WAIT_BATINFO:
+      current_bat_cmd_++;
+      phase_ = QueryPhase::SEND_BATINFO;
+      advance_phase_();
+      break;
   }
 }
 
@@ -246,6 +314,10 @@ void PylontechMonitorComponent::process_buffer_() {
              strstr(rx_buf_, "stat ") != nullptr) {
     const char *p = strstr(rx_buf_, "stat ");
     if (p) parse_stat_(atoi(p + 5));
+  } else if (strstr(rx_buf_, "Device address") != nullptr) {
+    // Réponse "info N" — on utilise current_bat_cmd_ car cette commande
+    // n'échoue pas son numéro de batterie dans la réponse elle-même
+    parse_battery_info_(current_bat_cmd_);
   }
 
   rx_len_ = 0;
@@ -395,7 +467,18 @@ void PylontechMonitorComponent::parse_cells_(int bat_idx) {
     if (strlen(token) > 0) {
       token_index++;
       if (token_index == 4) {
-        if (bat.capacity_sensor_) bat.capacity_sensor_->publish_state(atof(token) / 1000.0f);
+        float cap_ah = atof(token) / 1000.0f;
+        if (bat.capacity_sensor_) bat.capacity_sensor_->publish_state(cap_ah);
+
+        // SOH estimé = capacité actuelle (RC) / capacité nominale du modèle
+        // EXPÉRIMENTAL : nécessite enable_info_command: true pour connaître
+        // la capacité nominale ; fluctue selon la charge/température en
+        // cours, à interpréter comme une tendance et non une valeur exacte.
+        if (bat.nominal_capacity_ > 0.0f && bat.estimated_soh_sensor_) {
+          float estimated_soh = (cap_ah / bat.nominal_capacity_) * 100.0f;
+          if (estimated_soh > 0.0f && estimated_soh <= 120.0f)  // garde-fou anti-aberration
+            bat.estimated_soh_sensor_->publish_state(estimated_soh);
+        }
       }
       if (token_index >= 9 && (token_index - 9) % 4 == 0) {
         int cell_num = (token_index - 9) / 4;
@@ -443,6 +526,112 @@ void PylontechMonitorComponent::parse_stat_(int bat_idx) {
   }
 }
 
+
+// ============================================================
+// extract_info_field_() — extrait la valeur d'un champ texte
+// dans la réponse "info N", au format "Champ : valeur\r\n"
+// (basé sur les champs observés : Device address, Manufacturer,
+//  Device name, Board version, Specification, Barcode, etc.)
+// EXPÉRIMENTAL — non testé sur tous les firmwares Pylontech.
+// ============================================================
+std::string PylontechMonitorComponent::extract_info_field_(const char *field_name) {
+  const char *fin   = rx_buf_ + rx_len_;
+  const char *match = strstr(rx_buf_, field_name);
+  if (!match) return std::string();
+
+  // Avancer jusqu'au ':' qui sépare le nom du champ de sa valeur
+  while (match < fin && *match != ':') match++;
+  if (match >= fin) return std::string();
+  match++;  // sauter le ':'
+
+  // Sauter les espaces de début
+  while (match < fin && (*match == ' ' || *match == '\t')) match++;
+
+  // La valeur se termine au prochain \r ou \n
+  const char *value_end = match;
+  while (value_end < fin && *value_end != '\r' && *value_end != '\n') value_end++;
+
+  // Retirer les espaces de fin
+  while (value_end > match && *(value_end - 1) == ' ') value_end--;
+
+  if (value_end <= match) return std::string();
+  return std::string(match, value_end - match);
+}
+
+// ============================================================
+// parse_battery_info_() — réponse "info N"
+//
+// EXPÉRIMENTAL : commande non disponible/identique sur tous les
+// firmwares Pylontech. Fournit des données d'identification
+// (modèle, numéro de série, versions firmware) mais PAS de
+// capacité nominale exploitable pour un calcul de SOH fiable —
+// le champ "Specification" est publié tel quel en texte, à
+// interpréter manuellement selon le modèle.
+// ============================================================
+void PylontechMonitorComponent::parse_battery_info_(int bat_idx) {
+  if (bat_idx < 1 || bat_idx > (int)battery_count_) return;
+  PylontechBattery &bat = batteries_[bat_idx - 1];
+
+  std::string val;
+
+  val = extract_info_field_("Manufacturer");
+  if (!val.empty() && bat.manufacturer_text_sensor_)
+    bat.manufacturer_text_sensor_->publish_state(val);
+
+  val = extract_info_field_("Device name");
+  if (!val.empty() && bat.device_name_text_sensor_)
+    bat.device_name_text_sensor_->publish_state(val);
+
+  val = extract_info_field_("Barcode");
+  if (!val.empty() && bat.barcode_text_sensor_)
+    bat.barcode_text_sensor_->publish_state(val);
+
+  val = extract_info_field_("Specification");
+  if (!val.empty()) {
+    if (bat.specification_text_sensor_)
+      bat.specification_text_sensor_->publish_state(val);
+
+    // Extraction de la capacité nominale (Ah) — format observé "48V/50AH"
+    // ou "48V/100AH". On cherche le nombre juste avant "AH" (insensible
+    // à la casse selon les firmwares : "Ah", "AH", "ah").
+    size_t ah_pos = val.find("AH");
+    if (ah_pos == std::string::npos) ah_pos = val.find("Ah");
+    if (ah_pos == std::string::npos) ah_pos = val.find("ah");
+    if (ah_pos != std::string::npos) {
+      size_t num_start = ah_pos;
+      while (num_start > 0 && (isdigit((unsigned char)val[num_start - 1]) || val[num_start - 1] == '.'))
+        num_start--;
+      if (num_start < ah_pos) {
+        float cap = atof(val.substr(num_start, ah_pos - num_start).c_str());
+        if (cap > 0.0f) bat.nominal_capacity_ = cap;
+      }
+    }
+  }
+
+  val = extract_info_field_("Board version");
+  if (!val.empty() && bat.board_version_text_sensor_)
+    bat.board_version_text_sensor_->publish_state(val);
+
+  val = extract_info_field_("Main Soft version");
+  if (!val.empty() && bat.main_soft_version_text_sensor_)
+    bat.main_soft_version_text_sensor_->publish_state(val);
+
+  // "Soft  version" — deux espaces dans la trame Pylontech d'origine
+  val = extract_info_field_("Soft  version");
+  if (!val.empty() && bat.soft_version_text_sensor_)
+    bat.soft_version_text_sensor_->publish_state(val);
+
+  // "Boot  version" — deux espaces également
+  val = extract_info_field_("Boot  version");
+  if (!val.empty() && bat.boot_version_text_sensor_)
+    bat.boot_version_text_sensor_->publish_state(val);
+
+  val = extract_info_field_("Comm version");
+  if (!val.empty() && bat.comm_version_text_sensor_)
+    bat.comm_version_text_sensor_->publish_state(val);
+
+  ESP_LOGD(TAG, "Battery %d info parsed", bat_idx);
+}
+
 }  // namespace pylontech_monitor
 }  // namespace esphome
-
