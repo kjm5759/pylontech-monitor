@@ -209,6 +209,49 @@ automation:
 
 ---
 
+## Optional: Battery Identification & Estimated SOH (Experimental)
+
+The component can optionally query the `info N` command for each battery, once at boot, to retrieve identification data: manufacturer, model, serial number, firmware versions, and specification (nominal voltage/capacity).
+
+```yaml
+pylontech_monitor:
+  uart_id: uart_bus
+  battery_count: 10
+  enable_info_command: true   # disabled by default
+
+  batteries:
+    - device_name:       { name: "Bat 1 Model" }
+      manufacturer:       { name: "Bat 1 Manufacturer" }
+      barcode:             { name: "Bat 1 Serial" }
+      specification:       { name: "Bat 1 Spec" }
+      board_version:        { name: "Bat 1 Board Version" }
+      main_soft_version:    { name: "Bat 1 Main Soft Version" }
+      soft_version:         { name: "Bat 1 Soft Version" }
+      boot_version:         { name: "Bat 1 Boot Version" }
+      comm_version:         { name: "Bat 1 Comm Version" }
+      estimated_soh:        { name: "Bat 1 Estimated SOH" }
+```
+
+> ⚠️ **Experimental** — the `info N` command's exact field set may vary across Pylontech firmware versions. Tested and working on US2000B/US2000C/US5000 with Pylon firmware reporting `Specification` as `"48V/50AH"` or `"48V/100AH"`.
+
+### How it works
+
+- `info N` is sent once per battery, only at the first boot cycle (data is static — model, serial, firmware never change).
+- A short warm-up byte is sent before the very first `info 1` query, to flush a stray byte sometimes present on the UART TX line right after boot/reset — without it, the first battery's response could silently fail to parse.
+- The `specification` field (e.g. `"48V/50AH"`) is parsed to extract the nominal capacity in Ah, used to compute `estimated_soh`.
+
+### About `estimated_soh`
+
+Pylontech's master battery only reports a single **pack-level SOH** (`system_soh`) — individual battery SOH is not available natively. `estimated_soh` is a **rough approximation**:
+
+```
+estimated_soh = (current remaining capacity / nominal capacity) × 100
+```
+
+This is **not equivalent** to the official SOH (which accounts for internal resistance, temperature compensation, and historical degradation patterns). It fluctuates with temperature and active charge/discharge current, and should be read as a **trend indicator**, not an authoritative health metric. Use `system_soh` as the reliable reference; use `estimated_soh` only to compare relative health across batteries in the same rack.
+
+---
+
 ## Full Configuration Parameters
 
 | Parameter          | Default | Description                              |
@@ -220,6 +263,7 @@ automation:
 | `relay.soc_threshold`   | 100.0 | SOC % to activate relay             |
 | `relay.voltage_threshold` | 51.2 | Pack voltage (V) to activate relay |
 | `relay.hysteresis` | 2.0     | SOC % hysteresis to deactivate relay     |
+| `enable_info_command` | false | Query `info N` once at boot for identification (experimental) |
 
 ### System sensors
 
@@ -256,6 +300,16 @@ automation:
 | `capacity`          | Ah   | Remaining capacity       |
 | `soh`               | %    | State of Health          |
 | `cells`             | V    | List of up to 15 cell voltages |
+| `device_name`       | text | Battery model (e.g. "US5000") — requires `enable_info_command` |
+| `manufacturer`      | text | Manufacturer name — requires `enable_info_command` |
+| `barcode`            | text | Serial number — requires `enable_info_command` |
+| `specification`      | text | Nominal voltage/capacity (e.g. "48V/100AH") — requires `enable_info_command` |
+| `board_version`      | text | Board hardware version — requires `enable_info_command` |
+| `main_soft_version`  | text | Main firmware version — requires `enable_info_command` |
+| `soft_version`       | text | Firmware version — requires `enable_info_command` |
+| `boot_version`       | text | Bootloader version — requires `enable_info_command` |
+| `comm_version`       | text | Communication module version — requires `enable_info_command` |
+| `estimated_soh`      | %    | Estimated SOH (see note above) — requires `enable_info_command`, experimental |
 
 ---
 
