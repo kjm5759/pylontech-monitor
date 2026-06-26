@@ -75,6 +75,7 @@ void PylontechMonitorComponent::update() {
       return;
     } else {
       phase_ = QueryPhase::SEND_PWRSYS;
+      if (first_cycle_) { slow_pending_ = true; }
       advance_phase_();
     }
   }
@@ -267,6 +268,7 @@ void PylontechMonitorComponent::advance_phase_() {
       current_bat_cmd_++;
       phase_ = QueryPhase::SEND_STAT;
       advance_phase_();
+	  first_cycle_ = false;
       break;
 
     // ── Commande "info N" — ponctuelle, une seule fois au boot ──
@@ -489,6 +491,16 @@ void PylontechMonitorComponent::parse_cells_(int bat_idx) {
             bat.cell_sensors[cell_num]->publish_state(cell_v);
         }
       }
+	  
+	  if (token_index >= 10 && (token_index - 10) % 4 == 0) {
+        int cell_num = (token_index - 10) / 4;
+        if (cell_num < MAX_CELLS) {
+          float cell_t = atof(token);
+          if (cell_t > 10.0f) cell_t /= 1000.0f;
+          if (cell_t > 1.0f && cell_t < 99.9f && bat.cell_temperature_sensors[cell_num] != nullptr)
+            bat.cell_temperature_sensors[cell_num]->publish_state(cell_t);
+        }
+      }
     }
     token = strtok(nullptr, "#");
   }
@@ -612,6 +624,10 @@ void PylontechMonitorComponent::parse_battery_info_(int bat_idx) {
   if (!val.empty() && bat.board_version_text_sensor_)
     bat.board_version_text_sensor_->publish_state(val);
 
+  val = extract_info_field_("Board        ");
+  if (!val.empty() && bat.board_text_sensor_)
+    bat.board_text_sensor_->publish_state(val);
+
   val = extract_info_field_("Main Soft version");
   if (!val.empty() && bat.main_soft_version_text_sensor_)
     bat.main_soft_version_text_sensor_->publish_state(val);
@@ -625,6 +641,10 @@ void PylontechMonitorComponent::parse_battery_info_(int bat_idx) {
   val = extract_info_field_("Boot  version");
   if (!val.empty() && bat.boot_version_text_sensor_)
     bat.boot_version_text_sensor_->publish_state(val);
+
+  val = extract_info_field_("Release Date");
+  if (!val.empty() && bat.release_date_text_sensor_)
+    bat.release_date_text_sensor_->publish_state(val);
 
   val = extract_info_field_("Comm version");
   if (!val.empty() && bat.comm_version_text_sensor_)
