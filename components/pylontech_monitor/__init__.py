@@ -77,6 +77,7 @@ CONF_CAPACITY   = "capacity"
 CONF_SOH        = "soh"
 CONF_ESTIMATED_SOH = "estimated_soh"
 CONF_CELLS      = "cells"
+CONF_CELLS_TEMPERATURE = "cells_temperature"
 
 # Identification batterie via commande "info N" (expérimental)
 CONF_DEVICE_NAME        = "device_name"
@@ -84,9 +85,11 @@ CONF_MANUFACTURER       = "manufacturer"
 CONF_BARCODE            = "barcode"
 CONF_SPECIFICATION      = "specification"
 CONF_BOARD_VERSION      = "board_version"
+CONF_BOARD              = "board"
 CONF_MAIN_SOFT_VERSION  = "main_soft_version"
 CONF_SOFT_VERSION       = "soft_version"
 CONF_BOOT_VERSION       = "boot_version"
+CONF_RELEASE_DATE       = "release_date"
 CONF_COMM_VERSION       = "comm_version"
 
 # Relais intégré
@@ -167,7 +170,7 @@ BATTERY_SCHEMA = cv.Schema(
             accuracy_decimals=0,
         ),
         cv.Optional(CONF_COULOMB): sensor.sensor_schema(
-            unit_of_measurement="C",
+            unit_of_measurement="Ah",
             icon="mdi:battery-charging",
             state_class=STATE_CLASS_MEASUREMENT,
             accuracy_decimals=1,
@@ -206,6 +209,17 @@ BATTERY_SCHEMA = cv.Schema(
             ),
             cv.Length(min=1, max=15),
         ),
+        cv.Optional(CONF_CELLS_TEMPERATURE): cv.All(
+            cv.ensure_list(
+                sensor.sensor_schema(
+                    unit_of_measurement=UNIT_CELSIUS,
+                    device_class=DEVICE_CLASS_TEMPERATURE,
+                    state_class=STATE_CLASS_MEASUREMENT,
+                    accuracy_decimals=1,
+                )
+            ),
+            cv.Length(min=1, max=15),
+        ),
 
         # ── Identification (commande "info N" — expérimental) ──────────
         # Nécessite enable_info_command: true au niveau du composant.
@@ -225,6 +239,9 @@ BATTERY_SCHEMA = cv.Schema(
         cv.Optional(CONF_BOARD_VERSION): text_sensor.text_sensor_schema(
             icon="mdi:chip",
         ),
+         cv.Optional(CONF_BOARD): text_sensor.text_sensor_schema(
+            icon="mdi:chip",
+        ),
         cv.Optional(CONF_MAIN_SOFT_VERSION): text_sensor.text_sensor_schema(
             icon="mdi:chip",
         ),
@@ -232,6 +249,9 @@ BATTERY_SCHEMA = cv.Schema(
             icon="mdi:chip",
         ),
         cv.Optional(CONF_BOOT_VERSION): text_sensor.text_sensor_schema(
+            icon="mdi:chip",
+        ),
+        cv.Optional(CONF_RELEASE_DATE): text_sensor.text_sensor_schema(
             icon="mdi:chip",
         ),
         cv.Optional(CONF_COMM_VERSION): text_sensor.text_sensor_schema(
@@ -392,9 +412,11 @@ BATTERY_TEXT_SENSORS = [
     (CONF_BARCODE,           "set_barcode_text_sensor"),
     (CONF_SPECIFICATION,     "set_specification_text_sensor"),
     (CONF_BOARD_VERSION,     "set_board_version_text_sensor"),
+    (CONF_BOARD,             "set_board_text_sensor"),
     (CONF_MAIN_SOFT_VERSION, "set_main_soft_version_text_sensor"),
     (CONF_SOFT_VERSION,      "set_soft_version_text_sensor"),
     (CONF_BOOT_VERSION,      "set_boot_version_text_sensor"),
+    (CONF_RELEASE_DATE,      "set_release_date_text_sensor"),
     (CONF_COMM_VERSION,      "set_comm_version_text_sensor"),
 ]
 
@@ -440,6 +462,12 @@ async def to_code(config):
                     cg.add(cg.RawExpression(
                         f"{var}->get_battery({bat_index})->set_cell_sensor({cell_index}, {sens})"
                     ))
+            if CONF_CELLS_TEMPERATURE in bat_conf:
+                for cell_index, cell_conf in enumerate(bat_conf[CONF_CELLS_TEMPERATURE]):
+                    sens = await sensor.new_sensor(cell_conf)
+                    cg.add(cg.RawExpression(
+                        f"{var}->get_battery({bat_index})->set_cell_temperature_sensor({cell_index}, {sens})"
+                    ))    
             for conf_key, setter in BATTERY_TEXT_SENSORS:
                 if conf_key in bat_conf:
                     sens = await text_sensor.new_text_sensor(bat_conf[conf_key])
