@@ -55,15 +55,22 @@ class PylontechBattery {
     if (index < MAX_CELLS) cell_sensors[index] = s;
   }
 
+  sensor::Sensor *cell_temperature_sensors[MAX_CELLS]{};
+  void set_cell_temperature_sensor(uint8_t index, sensor::Sensor *s) {
+    if (index < MAX_CELLS) cell_temperature_sensors[index] = s;
+  }
+  
   // ── Identification (commande "info N" — optionnelle, expérimentale) ──
   PYLONTECH_TEXT_SENSOR(device_name)
   PYLONTECH_TEXT_SENSOR(manufacturer)
   PYLONTECH_TEXT_SENSOR(barcode)
   PYLONTECH_TEXT_SENSOR(specification)
   PYLONTECH_TEXT_SENSOR(board_version)
+  PYLONTECH_TEXT_SENSOR(board)
   PYLONTECH_TEXT_SENSOR(main_soft_version)
   PYLONTECH_TEXT_SENSOR(soft_version)
   PYLONTECH_TEXT_SENSOR(boot_version)
+  PYLONTECH_TEXT_SENSOR(release_date)
   PYLONTECH_TEXT_SENSOR(comm_version)
 };
 
@@ -166,6 +173,7 @@ class PylontechMonitorComponent : public PollingComponent, public uart::UARTDevi
   void parse_pwr_table_();
   void parse_system_info_();
   void parse_cells_(int bat_idx);
+  void parse_cells_temp(int bat_idx);
   void parse_stat_(int bat_idx);
   void parse_battery_info_(int bat_idx);
   std::string extract_info_field_(const char *field_name);
@@ -176,8 +184,9 @@ class PylontechMonitorComponent : public PollingComponent, public uart::UARTDevi
   uint8_t          battery_count_{1};
   bool             enable_info_command_{false};
   bool             batinfo_done_{false};  // info N exécuté une seule fois au boot
+  bool             first_cycle_{true};
   uint32_t         boot_time_ms_{0};
-  static constexpr uint32_t INFO_BOOT_DELAY_MS = 3000;  // stabilisation UART avant 1er "info"
+  static constexpr uint32_t INFO_BOOT_DELAY_MS = 5000;  // stabilisation UART avant 1er "info"
 };
 
 }  // namespace pylontech_monitor
