@@ -2,20 +2,22 @@
 
 ESPHome external component to monitor Pylontech battery racks (US2000, US3000, US5000) via the **console port** (RS232 TTL) of the master battery.
 
-Supports up to **10 batteries × 15 cells**, dual update rate, and an optional integrated relay (works without Home Assistant).
+Supports up to **10 batteries × 15 cells**, dual update rate, optional integrated relay, and battery identification (works without Home Assistant).
 
 ---
 
 ## Features
 
-- Full rack monitoring: voltage, current, SOC, SOH, capacity, power
-- Per-battery: voltage, current, temperature, cell voltages (×15), cycles, coulomb, SOH
+- Full rack monitoring: voltage, current, SOC, SOH, capacity, power, available energy
+- Per-battery: voltage, current, temperature (avg/high/low), cell voltages (×15), cell temperatures (×15), cycles, coulomb, capacity, estimated SOH
 - Dual update rate:
   - **Fast** (default 2s): `pwrsys` + `pwr` → SOC / voltage / current for automations
-  - **Slow** (default 60s): `getpwr` + `stat` → cell voltages, cycle count, coulomb
+  - **Slow** (default 60s): `getpwr` + `stat` → cell voltages, cell temperatures, cycle count, coulomb
+  - First slow cycle triggers **immediately at boot** (no 60s wait for first data)
 - Optional **integrated relay** — triggers directly on the ESP32 without Home Assistant
-- WiFi or **Ethernet W5500** (SPI) via packages
-- Tested on ESP32-S3 with Pylontech US2000 and US5000
+- Optional **battery identification** via `info N` command (experimental): model, serial number, firmware versions, estimated SOH per battery
+- WiFi or **Ethernet W5500** (SPI)
+- Tested on ESP32-S3 and classic ESP32 with Pylontech US2000B, US2000C and US5000
 
 ---
 
@@ -41,7 +43,7 @@ The console port outputs **RS232 TTL levels** — you need a **RS232-to-TTL adap
 | —                        | TXD (TTL out)     | RX (GPIO1) |
 | —                        | RXD (TTL in)      | TX (GPIO2) |
 
-> The console port uses the Pylontech CLI (commands: `pwrsys`, `pwr`, `getpwr N`, `stat N`).  
+> The console port uses the Pylontech CLI (commands: `pwrsys`, `pwr`, `getpwr N`, `stat N`, `info N`).  
 > Only the **master battery** (address 1) exposes this port — all modules in the rack respond.
 
 ---
@@ -59,7 +61,7 @@ The initialization sequence (PYLON binary protocol at 1200 bauds):
 
 Then switch to 115200 and send:
 ```
-login debug
+login debug\r
 ```
 
 This initialization is **not yet implemented** in the current version of the component (not needed for US5000/US2000C). If you have a US2000B master battery, please open an issue — implementation is planned for a future release.
@@ -70,7 +72,7 @@ This initialization is **not yet implemented** in the current version of the com
 
 ---
 
-### Optional: Ethernet W5500 (SPI)
+## Optional: Ethernet W5500 (SPI)
 
 | W5500 | ESP32-S3   |
 |-------|------------|
@@ -82,6 +84,17 @@ This initialization is **not yet implemented** in the current version of the com
 | RST   | GPIO14     |
 | 3.3V  | 3.3V       |
 | GND   | GND        |
+
+```yaml
+ethernet:
+  type: W5500
+  clk_pin: GPIO12
+  mosi_pin: GPIO11
+  miso_pin: GPIO13
+  cs_pin: GPIO10
+  interrupt_pin: GPIO9
+  reset_pin: GPIO14
+```
 
 ---
 
@@ -122,8 +135,10 @@ pylontech_monitor:
     name: "Pylontech Current"
   charge_power:
     name: "Pylontech Charge Power"
+    id: pylon_watt_charge
   discharge_power:
     name: "Pylontech Discharge Power"
+    id: pylon_watt_decharge
 
   batteries:
     - voltage:     { name: "Bat 1 Voltage" }
@@ -131,34 +146,39 @@ pylontech_monitor:
       temperature: { name: "Bat 1 Temperature" }
       soc:         { name: "Bat 1 SOC" }
       cycle_count: { name: "Bat 1 Cycles" }
+      capacity:    { name: "Bat 1 Capacity" }
       cells:
         - { name: "Bat 1 Cell 1" }
         - { name: "Bat 1 Cell 2" }
         # ... up to 15 cells
+      cells_temperature:
+        - { name: "Bat 1 Cell Temp 1" }
+        - { name: "Bat 1 Cell Temp 2" }
+        # ... up to 15 cell temperatures
 ```
 
-### 3. Network — WiFi or Ethernet
+### 3. Energy sensors (Home Assistant energy dashboard)
 
-**WiFi** (default):
 ```yaml
-wifi:
-  ssid: !secret wifi_ssid
-  password: !secret wifi_password
-```
+sensor:
+  - platform: total_daily_energy
+    name: pylontech_charge
+    power_id: pylon_watt_charge
+    unit_of_measurement: kWh
+    accuracy_decimals: 3
+    state_class: total_increasing
+    filters:
+      - multiply: 0.001
 
-**Ethernet W5500** (recommended for stability):
-```yaml
-ethernet:
-  type: W5500
-  clk_pin: GPIO12
-  mosi_pin: GPIO11
-  miso_pin: GPIO13
-  cs_pin: GPIO10
-  interrupt_pin: GPIO9
-  reset_pin: GPIO14
+  - platform: total_daily_energy
+    name: pylontech_decharge
+    power_id: pylon_watt_decharge
+    unit_of_measurement: kWh
+    accuracy_decimals: 3
+    state_class: total_increasing
+    filters:
+      - multiply: 0.001
 ```
-
-Using `packages:` makes it easy to switch — see the example YAML files in this repository.
 
 ---
 
@@ -171,7 +191,7 @@ Useful for standalone installations (e.g. water heater on solar surplus).
 pylontech_monitor:
   # ...
   relay:
-    pin: GPIO5
+    pin: GPIO21
     soc_threshold: 100      # activate when SOC >= 100%
     voltage_threshold: 51.2 # and voltage >= 51.2V
     hysteresis: 2.0         # deactivate when SOC < 98%
@@ -183,16 +203,16 @@ pylontech_monitor:
 
 ### Alternative: Home Assistant Automation
 
-If you prefer to manage the relay in HA:
-
 ```yaml
 # ESPHome
 switch:
   - platform: gpio
-    pin: GPIO5
+    pin: GPIO21
     name: "Water heater relay"
     id: relay_water_heater
+```
 
+```yaml
 # Home Assistant automation
 automation:
   trigger:
@@ -220,25 +240,29 @@ pylontech_monitor:
   enable_info_command: true   # disabled by default
 
   batteries:
-    - device_name:       { name: "Bat 1 Model" }
-      manufacturer:       { name: "Bat 1 Manufacturer" }
-      barcode:             { name: "Bat 1 Serial" }
-      specification:       { name: "Bat 1 Spec" }
-      board_version:        { name: "Bat 1 Board Version" }
-      main_soft_version:    { name: "Bat 1 Main Soft Version" }
-      soft_version:         { name: "Bat 1 Soft Version" }
-      boot_version:         { name: "Bat 1 Boot Version" }
-      comm_version:         { name: "Bat 1 Comm Version" }
-      estimated_soh:        { name: "Bat 1 Estimated SOH" }
+    - device_name:      { name: "Bat 1 Model" }
+      manufacturer:     { name: "Bat 1 Manufacturer" }
+      barcode:          { name: "Bat 1 Serial" }
+      specification:    { name: "Bat 1 Spec" }
+      board_version:    { name: "Bat 1 Board Version" }
+	    board:            { name: "Bat 1 Board"}
+      main_soft_version: { name: "Bat 1 Main Soft Version" }
+      soft_version:     { name: "Bat 1 Soft Version" }
+      boot_version:     { name: "Bat 1 Boot Version" }
+      comm_version:     { name: "Bat 1 Comm Version" }
+      release_date:     { name: "Bat 1 Release Date" }
+      estimated_soh:    { name: "Bat 1 Estimated SOH" }
 ```
 
 > ⚠️ **Experimental** — the `info N` command's exact field set may vary across Pylontech firmware versions. Tested and working on US2000B/US2000C/US5000 with Pylon firmware reporting `Specification` as `"48V/50AH"` or `"48V/100AH"`.
+> ⚠️  board: with US2000B return no value 
 
 ### How it works
 
 - `info N` is sent once per battery, only at the first boot cycle (data is static — model, serial, firmware never change).
-- A short warm-up byte is sent before the very first `info 1` query, to flush a stray byte sometimes present on the UART TX line right after boot/reset — without it, the first battery's response could silently fail to parse.
-- The `specification` field (e.g. `"48V/50AH"`) is parsed to extract the nominal capacity in Ah, used to compute `estimated_soh`.
+- A warm-up byte (`\r`) is sent before the very first `info 1` query, to flush a stray byte sometimes present on the UART TX line right after boot/reset. Without it, the first battery's response could silently fail to parse (observed as `"8\xf8info"` received instead of `"info"` by the Pylontech).
+- A 5 second stabilization delay is applied before the first `info` sequence after boot/reset.
+- The `specification` field (e.g. `"48V/50AH"`) is automatically parsed to extract the nominal capacity in Ah, used to compute `estimated_soh`.
 
 ### About `estimated_soh`
 
@@ -248,77 +272,81 @@ Pylontech's master battery only reports a single **pack-level SOH** (`system_soh
 estimated_soh = (current remaining capacity / nominal capacity) × 100
 ```
 
-This is **not equivalent** to the official SOH (which accounts for internal resistance, temperature compensation, and historical degradation patterns). It fluctuates with temperature and active charge/discharge current, and should be read as a **trend indicator**, not an authoritative health metric. Use `system_soh` as the reliable reference; use `estimated_soh` only to compare relative health across batteries in the same rack.
+This is **not equivalent** to the official SOH. It fluctuates with temperature and active charge/discharge current, and should be read as a **trend indicator**, not an authoritative health metric. Use `system_soh` as the reliable reference; use `estimated_soh` only to compare relative health across batteries in the same rack.
 
 ---
 
 ## Full Configuration Parameters
 
-| Parameter          | Default | Description                              |
-|--------------------|---------|------------------------------------------|
-| `battery_count`    | 1       | Number of batteries in rack (1–10)       |
-| `update_interval`  | 2s      | Fast cycle interval (pwrsys + pwr)       |
-| `slow_interval`    | 60s     | Slow cycle interval (getpwr + stat)      |
-| `relay.pin`        | —       | GPIO pin for integrated relay (optional) |
-| `relay.soc_threshold`   | 100.0 | SOC % to activate relay             |
-| `relay.voltage_threshold` | 51.2 | Pack voltage (V) to activate relay |
-| `relay.hysteresis` | 2.0     | SOC % hysteresis to deactivate relay     |
-| `enable_info_command` | false | Query `info N` once at boot for identification (experimental) |
+| Parameter               | Default | Description                                         |
+|-------------------------|---------|-----------------------------------------------------|
+| `battery_count`         | 1       | Number of batteries in rack (1–10)                  |
+| `update_interval`       | 2s      | Fast cycle interval (pwrsys + pwr)                  |
+| `slow_interval`         | 60s     | Slow cycle interval (getpwr + stat)                 |
+| `enable_info_command`   | false   | Query `info N` once at boot for identification (experimental) |
+| `relay.pin`             | —       | GPIO pin for integrated relay (optional)            |
+| `relay.soc_threshold`   | 100.0   | SOC % to activate relay                             |
+| `relay.voltage_threshold` | 51.2  | Pack voltage (V) to activate relay                  |
+| `relay.hysteresis`      | 2.0     | SOC % hysteresis to deactivate relay                |
 
 ### System sensors
 
-| Key                    | Unit | Description                    |
-|------------------------|------|--------------------------------|
-| `system_voltage`       | V    | Pack voltage                   |
-| `system_current`       | A    | Pack current (+ charge, - discharge) |
-| `system_soc`           | %    | State of Charge                |
-| `system_soh`           | %    | State of Health                |
-| `system_capacity`      | Ah   | Remaining capacity (RC)        |
-| `system_capacity_total`| Ah   | Full charge capacity (FCC)     |
-| `installed_batteries`  |      | Total batteries configured     |
-| `present_batteries`    |      | Batteries currently online     |
-| `charge_current`       | A    | Charge current (positive only) |
-| `discharge_current`    | A    | Discharge current (positive)   |
-| `charge_power`         | W    | Charge power                   |
-| `discharge_power`      | W    | Discharge power                |
-| `available_energy`     | Wh   | Available energy (V × RC)      |
+| Key                     | Unit | Description                          |
+|-------------------------|------|--------------------------------------|
+| `system_voltage`        | V    | Pack voltage                         |
+| `system_current`        | A    | Pack current (+ charge, - discharge) |
+| `system_soc`            | %    | State of Charge                      |
+| `system_soh`            | %    | State of Health (pack level)         |
+| `system_capacity`       | Ah   | Remaining capacity (RC)              |
+| `system_capacity_total` | Ah   | Full charge capacity (FCC)           |
+| `installed_batteries`   |      | Total batteries configured           |
+| `present_batteries`     |      | Batteries currently online           |
+| `charge_current`        | A    | Charge current (positive only)       |
+| `discharge_current`     | A    | Discharge current (positive)         |
+| `charge_power`          | W    | Charge power                         |
+| `discharge_power`       | W    | Discharge power                      |
+| `available_energy`      | Wh   | Available energy (V × RC)            |
 
 ### Per-battery sensors
 
-| Key                 | Unit | Description              |
-|---------------------|------|--------------------------|
-| `voltage`           | V    | Battery voltage          |
-| `current`           | A    | Battery current          |
-| `temperature`       | °C   | Average temperature      |
-| `temp_high`         | °C   | Highest temperature      |
-| `temp_low`          | °C   | Lowest temperature       |
-| `cell_voltage_high` | V    | Highest cell voltage     |
-| `cell_voltage_low`  | V    | Lowest cell voltage      |
-| `soc`               | %    | State of Charge          |
-| `cycle_count`       | cycles | Charge cycle count     |
-| `coulomb`           | C   | Cumulative coulomb count |
-| `capacity`          | Ah   | Remaining capacity       |
-| `soh`               | %    | State of Health          |
-| `cells`             | V    | List of up to 15 cell voltages |
-| `device_name`       | text | Battery model (e.g. "US5000") — requires `enable_info_command` |
-| `manufacturer`      | text | Manufacturer name — requires `enable_info_command` |
-| `barcode`            | text | Serial number — requires `enable_info_command` |
-| `specification`      | text | Nominal voltage/capacity (e.g. "48V/100AH") — requires `enable_info_command` |
-| `board_version`      | text | Board hardware version — requires `enable_info_command` |
-| `main_soft_version`  | text | Main firmware version — requires `enable_info_command` |
-| `soft_version`       | text | Firmware version — requires `enable_info_command` |
-| `boot_version`       | text | Bootloader version — requires `enable_info_command` |
-| `comm_version`       | text | Communication module version — requires `enable_info_command` |
-| `estimated_soh`      | %    | Estimated SOH (see note above) — requires `enable_info_command`, experimental |
+| Key                  | Unit   | Description                                              |
+|----------------------|--------|----------------------------------------------------------|
+| `voltage`            | V      | Battery voltage                                          |
+| `current`            | A      | Battery current                                          |
+| `temperature`        | °C     | Average temperature                                      |
+| `temp_high`          | °C     | Highest temperature                                      |
+| `temp_low`           | °C     | Lowest temperature                                       |
+| `cell_voltage_high`  | V      | Highest cell voltage                                     |
+| `cell_voltage_low`   | V      | Lowest cell voltage                                      |
+| `soc`                | %      | State of Charge                                          |
+| `cycle_count`        | cycles | Charge cycle count                                       |
+| `coulomb`            | Ah     | Cumulative coulomb count                                 |
+| `capacity`           | Ah     | Remaining capacity                                       |
+| `soh`                | %      | State of Health (if available in firmware)               |
+| `cells`              | V      | List of up to 15 cell voltages                           |
+| `cells_temperature`  | °C     | List of up to 15 cell temperatures                       |
+| `estimated_soh`      | %      | Estimated SOH — requires `enable_info_command` (experimental) |
+| `device_name`        | text   | Battery model (e.g. "US5000") — requires `enable_info_command` |
+| `manufacturer`       | text   | Manufacturer name — requires `enable_info_command`       |
+| `barcode`            | text   | Serial number — requires `enable_info_command`           |
+| `specification`      | text   | Nominal spec (e.g. "48V/100AH") — requires `enable_info_command` |
+| `board_version`      | text   | Board hardware version — requires `enable_info_command`  |
+| `board`              | text   | Board identifier — requires `enable_info_command`        |
+| `main_soft_version`  | text   | Main firmware version — requires `enable_info_command`   |
+| `soft_version`       | text   | Firmware version — requires `enable_info_command`        |
+| `boot_version`       | text   | Bootloader version — requires `enable_info_command`      |
+| `comm_version`       | text   | Communication module version — requires `enable_info_command` |
+| `release_date`       | text   | Firmware release date — requires `enable_info_command`   |
 
 ---
 
 ## Tested Hardware
 
-| Battery model | Cells | Firmware     | Status |
-|---------------|-------|--------------|--------|
-| US2000C       | 15    | V2.8 / V3.x  | ✅     |
-| US5000        | 15    | V2.8 / V3.x  | ✅     |
+| Battery model | Cells | Firmware    | Status |
+|---------------|-------|-------------|--------|
+| US2000B       | 15    | V2.x        | ✅     |
+| US2000C       | 15    | V2.8 / V3.x | ✅     |
+| US5000        | 15    | V2.8 / V3.x | ✅     |
 
 ---
 
@@ -339,3 +367,4 @@ MIT — free to use, modify and distribute.
 
 Based on original work by [@kjm5759](https://github.com/kjm5759).  
 Structured as an ESPHome official-style external component.
+
