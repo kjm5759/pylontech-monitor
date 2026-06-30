@@ -363,6 +363,12 @@ MIT — free to use, modify and distribute.
 
 ---
 
+Disclaimer
+
+Use at your own risk.
+
+---
+
 ## Credits
 
 Based on original work by [@kjm5759](https://github.com/kjm5759).  
