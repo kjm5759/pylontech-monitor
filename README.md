@@ -363,7 +363,7 @@ MIT — free to use, modify and distribute.
 
 ---
 
-Disclaimer
+## Disclaimer
 
 Use at your own risk.
 
